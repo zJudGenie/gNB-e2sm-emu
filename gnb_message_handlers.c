@@ -1,17 +1,19 @@
 //
 // Created by Eugenio Moro on 04/24/23.
+// Edited by Rey P. on 08/11/25.
 //
 
 #include "gnb_message_handlers.h"
 #include <stdbool.h>
 #define CONNECTED_UES 4
+#define INITIAL_MCS 8
 
 int gnb_id = 0;
 bool is_initialized = false;
 typedef struct {
-    int rnti;
-    bool prop_1;
-    float prop_2;
+    int32_t rnti;
+    float ue_ber_downlink;
+    uint32_t ue_mcs_downlink;
 } ue_struct;
 ue_struct connected_ue_list[CONNECTED_UES];
 
@@ -21,10 +23,12 @@ ue_struct connected_ue_list[CONNECTED_UES];
 void initialize_ues_if_needed(){
     if(is_initialized)
         return;
-    for (int ue=0;ue<CONNECTED_UES;ue++){
+
+    srand(time(NULL));
+    for (int ue = 0; ue < CONNECTED_UES; ue++){
         connected_ue_list[ue].rnti = rand();
-        connected_ue_list[ue].prop_1 = false;
-        connected_ue_list[ue].prop_2 = -1;
+        connected_ue_list[ue].ue_ber_downlink = 0;
+        connected_ue_list[ue].ue_mcs_downlink = INITIAL_MCS;
     }
     is_initialized = true;
 }
@@ -87,6 +91,7 @@ void build_indication_response(RANMessage* in_mess, int out_socket, sockaddr_in 
     buflen = ran_indication_response__get_packed_size(&rsp);
     buf = malloc(buflen);
     ran_indication_response__pack(&rsp,buf);
+
     printf("Sending indication response\n");
     unsigned slen = sizeof(servaddr);
     int rev = sendto(out_socket, (const char *)buf, buflen,
@@ -172,25 +177,25 @@ void ran_write(RANParamMapEntry* target_param_map_entry){
 
 void apply_properties_to_ue_list(UeListM* ue_list){
     // loop the ues and apply what needed to each, according to what is inside the list received from the xapp
-    for(int ue=0; ue<ue_list->n_ue_info; ue++){
-        // apply generic properties (example)
-        set_ue_properties(ue_list->ue_info[ue]->rnti,
-                          ue_list->ue_info[ue]->prop_1,
-                          ue_list->ue_info[ue]->prop_2);
-
-        // more stuff later when needed     
+    for(int ue = 0; ue < ue_list->n_ue_info; ue++){
+        // apply received properties
+        set_ue_properties(ue_list->ue_info[ue]);
     }
 }
 
-void set_ue_properties(int rnti, bool prop_1, float prop_2){
+void set_ue_properties(UeInfoM* ue_info){
 
     // iterate ue list until rnti is found
     bool rnti_not_found = true;
-    for(int ue=0; ue<CONNECTED_UES; ue++) {
-        if(connected_ue_list[ue].rnti == rnti){
+    for(int ue = 0; ue < CONNECTED_UES; ue++) {
+        if(connected_ue_list[ue].rnti == ue_info->rnti){
             printf("RNTI found\n");
-            connected_ue_list[ue].prop_1 = prop_1;
-            connected_ue_list[ue].prop_2 = prop_2;
+
+            if (ue_info->has_ue_mcs_downlink) {
+                connected_ue_list[ue].ue_mcs_downlink = ue_info->ue_mcs_downlink;
+                printf("INFO: MCS[%u] set to %d\n", ue_info->rnti, ue_info->ue_mcs_downlink);
+            }
+
             rnti_not_found = false;
             break;
         } else {
@@ -198,7 +203,7 @@ void set_ue_properties(int rnti, bool prop_1, float prop_2){
         }
     }
     if(rnti_not_found){
-        printf("RNTI %u not found\n", rnti);
+        printf("RNTI %u not found\n", ue_info->rnti);
     }
 }
 
@@ -263,7 +268,7 @@ UeListM* build_ue_list_message(){
     // build list of ue_info_m (this is also a protobuf message)
     UeInfoM** ue_info_list;
     ue_info_list = malloc(sizeof(UeInfoM*)*(CONNECTED_UES+1)); // allocating space for 1 additional element which will be NULL (terminator element)
-    for(int i = 0; i<CONNECTED_UES; i++){
+    for(int i = 0; i < CONNECTED_UES; i++){
         // init list
         ue_info_list[i] = malloc(sizeof(UeInfoM));
         ue_info_m__init(ue_info_list[i]);
@@ -271,29 +276,19 @@ UeListM* build_ue_list_message(){
         // read rnti and add to message
         ue_info_list[i]->rnti = connected_ue_list[i].rnti;
 
-        // read mesures and add to message (actually just send random data)
+        // read measures and add to message (actually just send random data)
 
         // measures
-        ue_info_list[i]->has_meas_type_1 = 1;
-        ue_info_list[i]->meas_type_1 = rand();
-        ue_info_list[i]->has_meas_type_2 = 1;
-        ue_info_list[i]->meas_type_2 = rand();
-        ue_info_list[i]->has_meas_type_3 = 1;
-        ue_info_list[i]->meas_type_3 = rand();
+        ue_info_list[i]->has_ue_ber_downlink = 1;
+        ue_info_list[i]->ue_ber_downlink = (float)rand()/(float)(RAND_MAX); //random float [0..1]
 
         // properties
-        ue_info_list[i]->has_prop_1 = 1;
-        ue_info_list[i]->prop_1 = connected_ue_list[i].prop_1;
-        if(connected_ue_list[i].prop_2 > -1){
-            ue_info_list[i]->has_prop_2 = 1;
-            ue_info_list[i]->prop_2 = connected_ue_list[i].prop_2;
-        }
-
-
+        ue_info_list[i]->has_ue_mcs_downlink = 1;
+        ue_info_list[i]->ue_mcs_downlink = connected_ue_list[i].ue_mcs_downlink;
     }
     // add a null terminator to the list
     ue_info_list[CONNECTED_UES] = NULL;
-    // assgin ue info pointer to actually fill the field
+    // assign ue info pointer to actually fill the field
     ue_list_m->ue_info = ue_info_list;
     return ue_list_m;
 }
